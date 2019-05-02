@@ -78,7 +78,8 @@ auth := context.WithValue(context.Background(), sw.ContextBasicAuth, sw.BasicAut
     UserName: "username",
     Password: "password",
 })
-r, err := client.Service.Operation(auth, args)
+// This method will return operation-dependent response, *http.Response and and error
+r, hr, err := client.Service.Operation(auth, args)
 ```
 
 {{/isBasic}}
