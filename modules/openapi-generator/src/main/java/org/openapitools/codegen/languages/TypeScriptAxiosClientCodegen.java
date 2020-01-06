@@ -17,19 +17,23 @@
 
 package org.openapitools.codegen.languages;
 
-import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.parser.util.SchemaTypeUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.openapitools.codegen.CliOption;
+import org.openapitools.codegen.CodegenDiscriminator;
 import org.openapitools.codegen.CodegenModel;
 import org.openapitools.codegen.CodegenProperty;
 import org.openapitools.codegen.CodegenOperation;
 import org.openapitools.codegen.SupportingFile;
 import org.openapitools.codegen.utils.ModelUtils;
 
-import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.stream.Stream;
+
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.commons.lang3.StringUtils.capitalize;
 
 public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodegen {
 
@@ -145,6 +149,60 @@ public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodege
     }
 
     @Override
+    public Map<String, Object> postProcessAllModels(Map<String, Object> allModelsDefinitions) {
+        allModelsDefinitions = super.postProcessAllModels(allModelsDefinitions);
+
+        Map<String, UnionTypeDiscriminator> discriminators = getCodegenModels(allModelsDefinitions)
+            .filter(model -> model.oneOf.size() > 0)
+            .flatMap(unionTypeModel -> unionTypeModel.oneOf.stream()
+                .map(oneOf -> new UnionTypeDiscriminator(unionTypeModel, oneOf))
+            )
+            .collect(toMap(discriminator -> discriminator.mappedModelName, identity()));
+
+        getCodegenModels(allModelsDefinitions)
+            .filter(model -> discriminators.containsKey(model.name))
+            .forEach(model -> model.getVendorExtensions().put("discriminator", discriminators.get(model.name)));
+
+        getCodegenModels(allModelsDefinitions)
+            .filter(model -> model.oneOf.size() > 0)
+            .forEach(model -> {
+                model.getVendorExtensions().put("discriminatorEnum", getDiscriminatorEnum(model.getDiscriminator()));
+            });
+
+        allModelsDefinitions.entrySet().stream()
+            .filter(modelEntry -> discriminators.containsKey(modelEntry.getKey()))
+            .forEach(modelEntry -> addDiscriminatorEnumImport(
+                (Map<String, Object>) modelEntry.getValue(),
+                discriminators.get(modelEntry.getKey())
+            ));
+
+        return allModelsDefinitions;
+    }
+
+    private void addDiscriminatorEnumImport(Map<String, Object> modelSchema, UnionTypeDiscriminator discriminator) {
+        HashMap<String, String> modelImport = new HashMap<>();
+        // discriminator enum is located in the union type file
+        // so we import unionEnumModelName from unionTypeModelName file
+        modelImport.put("class", discriminator.discriminatorEnum);
+        modelImport.put("filename", discriminator.unionTypeModelName.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT));
+
+        ((List<Object>) modelSchema.get("imports")).add(modelImport);
+    }
+
+    private String getDiscriminatorEnum(CodegenDiscriminator discriminator) {
+        return capitalize(discriminator.getPropertyName());
+    }
+
+    private Stream<CodegenModel> getCodegenModels(Map<String, Object> allModelsDefinitions) {
+        return allModelsDefinitions.values()
+            .stream()
+            .map(modelsContainer -> ((Map<String, Object>) modelsContainer).get("models"))
+            .flatMap(models -> ((List<Object>) models).stream())
+            .map(modelContainer -> ((Map<String, Object>) modelContainer).get("model"))
+            .map(model -> (CodegenModel) model);
+    }
+
+    @Override
     protected void addAdditionPropertiesToCodeGenModel(CodegenModel codegenModel, Schema schema) {
         codegenModel.additionalPropertiesType = getTypeDeclaration(ModelUtils.getAdditionalProperties(schema));
         addImport(codegenModel, codegenModel.additionalPropertiesType);
@@ -221,4 +279,40 @@ public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodege
         supportingFiles.add(new SupportingFile("tsconfig.mustache", "", "tsconfig.json"));
     }
 
+    private static class UnionTypeDiscriminator {
+
+        /**
+         * Model that is a part of the union type;
+         */
+        public final String mappedModelName;
+
+        /**
+         * Union type created from bunch of models.
+         */
+        public final String unionTypeModelName;
+
+        /**
+         * Property name for discriminator value.
+         */
+        public final String discriminatorProperty;
+
+        /**
+         * Type script Enum to get discriminator value from.
+         */
+        public final String discriminatorEnum;
+
+        /**
+         * Enum value for this mapped model.
+         */
+        public final String discriminatorEnumValue;
+
+        UnionTypeDiscriminator(CodegenModel unionTypeModel, String mappedModelName) {
+            this.mappedModelName = mappedModelName;
+            this.unionTypeModelName = unionTypeModel.getName();
+
+            this.discriminatorProperty = unionTypeModel.getDiscriminator().getPropertyName();
+            this.discriminatorEnum = capitalize(discriminatorProperty);
+            this.discriminatorEnumValue = mappedModelName;
+        }
+    }
 }

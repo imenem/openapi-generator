@@ -3,4 +3,15 @@
  * {{{description}}}{{/description}}
  * @export
  */
-export type {{classname}} = {{#oneOf}}{{{.}}}{{^-last}} | {{/-last}}{{/oneOf}};
+export type {{classname}} =
+    {{#oneOf}}
+    {{{.}}}{{^-last}} | {{/-last}}{{#-last}};{{/-last}}
+    {{/oneOf}}
+
+{{#vendorExtensions.discriminatorEnum}}
+export enum {{.}} {
+    {{#oneOf}}
+    {{{.}}} = "{{{.}}}",
+    {{/oneOf}}
+}
+{{/vendorExtensions.discriminatorEnum}}
