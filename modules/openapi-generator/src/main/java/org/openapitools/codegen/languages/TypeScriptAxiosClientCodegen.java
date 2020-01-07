@@ -184,7 +184,7 @@ public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodege
         // discriminator enum is located in the union type file
         // so we import unionEnumModelName from unionTypeModelName file
         modelImport.put("class", discriminator.discriminatorEnum);
-        modelImport.put("filename", discriminator.unionTypeModelName.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT));
+        modelImport.put("filename", discriminator.unionTypeModelName);
 
         ((List<Object>) modelSchema.get("imports")).add(modelImport);
     }
@@ -222,9 +222,6 @@ public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodege
             Map<String, Object> mo = (Map<String, Object>) _mo;
             CodegenModel cm = (CodegenModel) mo.get("model");
 
-            // Deduce the model file name in kebab case
-            cm.classFilename = cm.classname.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT);
-
             //processed enum names
             if(!withoutPrefixEnums) {
                 cm.imports = new TreeSet(cm.imports);
@@ -252,19 +249,19 @@ public class TypeScriptAxiosClientCodegen extends AbstractTypeScriptClientCodege
             String tsImport = tsModelPackage + "/" + javaImport;
             m.put("tsImport", tsImport);
             m.put("class", javaImport);
-            m.put("filename", javaImport.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT));
+            m.put("filename", javaImport);
         }
         return objs;
     }
 
     @Override
     public String toModelFilename(String name) {
-        return super.toModelFilename(name).replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT);
+        return super.toModelFilename(name);
     }
 
     @Override
     public String toApiFilename(String name) {
-        return super.toApiFilename(name).replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT);
+        return super.toApiFilename(name);
     }
 
     private void addNpmPackageGeneration() {
