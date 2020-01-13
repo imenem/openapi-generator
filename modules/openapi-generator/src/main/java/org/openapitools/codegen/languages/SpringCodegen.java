@@ -21,6 +21,9 @@ import com.samskivert.mustache.Mustache;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.media.ArraySchema;
+import io.swagger.v3.oas.models.media.ComposedSchema;
+import io.swagger.v3.oas.models.media.Schema;
 import org.apache.commons.lang3.tuple.Pair;
 import org.openapitools.codegen.*;
 import org.openapitools.codegen.languages.features.BeanValidationFeatures;
@@ -28,6 +31,7 @@ import org.openapitools.codegen.languages.features.OptionalFeatures;
 import org.openapitools.codegen.languages.features.PerformBeanValidationFeatures;
 import org.openapitools.codegen.templating.mustache.SplitStringLambda;
 import org.openapitools.codegen.templating.mustache.TrimWhitespaceLambda;
+import org.openapitools.codegen.utils.ModelUtils;
 import org.openapitools.codegen.utils.URLPathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -97,6 +101,8 @@ public class SpringCodegen extends AbstractJavaCodegen
     protected boolean hateoas = false;
     protected boolean returnSuccessCode = false;
     protected boolean unhandledException = false;
+
+    protected List<CodegenModel> addOneOfInterfaces = new ArrayList<CodegenModel>();
 
     public SpringCodegen() {
         super();
@@ -551,6 +557,27 @@ public class SpringCodegen extends AbstractJavaCodegen
                 }
             }
         }
+
+        for (Map.Entry<String, Schema> e : openAPI.getComponents().getSchemas().entrySet()) {
+            String n = toModelName(e.getKey());
+            Schema s = e.getValue();
+            String nOneOf = toModelName(n + "OneOf");
+            if (ModelUtils.isComposedSchema(s)) {
+                addOneOfNameExtension(s, n);
+            } else if (ModelUtils.isArraySchema(s)) {
+                Schema items = ((ArraySchema) s).getItems();
+                if (ModelUtils.isComposedSchema(items)) {
+                    addOneOfNameExtension(items, nOneOf);
+                    addOneOfInterfaceModel((ComposedSchema) items, nOneOf);
+                }
+            } else if (ModelUtils.isMapSchema(s)) {
+                Schema addProps = ModelUtils.getAdditionalProperties(s);
+                if (addProps != null && ModelUtils.isComposedSchema(addProps)) {
+                    addOneOfNameExtension(addProps, nOneOf);
+                    addOneOfInterfaceModel((ComposedSchema) addProps, nOneOf);
+                }
+            }
+        }
     }
 
     @Override
@@ -837,6 +864,154 @@ public class SpringCodegen extends AbstractJavaCodegen
         return objs;
     }
 
+    public void addOneOfNameExtension(Schema s, String name) {
+        ComposedSchema cs = (ComposedSchema) s;
+        if (cs.getOneOf() != null && cs.getOneOf().size() > 0) {
+            cs.addExtension("x-oneOfName", name);
+        }
+    }
+
+    public void addOneOfInterfaceModel(ComposedSchema cs, String type) {
+        CodegenModel cm = new CodegenModel();
+
+        for (Schema o : cs.getOneOf()) {
+            // TODO: inline objects
+            cm.oneOf.add(toModelName(ModelUtils.getSimpleRef(o.get$ref())));
+        }
+        cm.name = type;
+        cm.classname = type;
+        cm.vendorExtensions.put("isOneOfInterface", true);
+        cm.discriminator = createDiscriminator("", (Schema) cs);
+        cm.interfaceModels = new ArrayList<CodegenModel>();
+
+        addOneOfInterfaces.add(cm);
+    }
+
+    @Override
+    public Map<String, Object> postProcessModels(Map<String, Object> objs) {
+        objs = super.postProcessModels(objs);
+        List<Object> models = (List<Object>) objs.get("models");
+
+        List<Map<String, String>> imports = (List<Map<String, String>>) objs.get("imports");
+        for (Object _mo : models) {
+            Map<String, Object> mo = (Map<String, Object>) _mo;
+            CodegenModel cm = (CodegenModel) mo.get("model");
+            boolean addImports = false;
+            for (CodegenProperty var : cm.vars) {
+                boolean isOptionalNullable = Boolean.FALSE.equals(var.required) && Boolean.TRUE.equals(var.isNullable);
+                // only add JsonNullable and related imports to optional and nullable values
+                addImports |= isOptionalNullable;
+                var.getVendorExtensions().put("isJacksonOptionalNullable", isOptionalNullable);
+            }
+            if (addImports) {
+                Map<String, String> imports2Classnames = new HashMap<String, String>() {{
+                    put("JsonNullable", "org.openapitools.jackson.nullable.JsonNullable");
+                    put("NoSuchElementException", "java.util.NoSuchElementException");
+                    put("JsonIgnore", "com.fasterxml.jackson.annotation.JsonIgnore");
+                }};
+                for (Map.Entry<String, String> entry : imports2Classnames.entrySet()) {
+                    cm.imports.add(entry.getKey());
+                    Map<String, String> importsItem = new HashMap<String, String>();
+                    importsItem.put("import", entry.getValue());
+                    imports.add(importsItem);
+                }
+            }
+        }
+
+        // add implements for serializable/parcelable to all models
+        for (Object _mo : models) {
+            Map<String, Object> mo = (Map<String, Object>) _mo;
+            CodegenModel cm = (CodegenModel) mo.get("model");
+            cm.getVendorExtensions().putIfAbsent("implements", new ArrayList<String>());
+            List<String> impl = (List<String>) cm.getVendorExtensions().get("implements");
+            if (this.serializableModel) {
+                impl.add("Serializable");
+            }
+        }
+
+        return objs;
+    }
+
+    @Override
+    public Map<String, Object> postProcessAllModels(Map<String, Object> objs) {
+        objs = super.postProcessAllModels(objs);
+
+        // First, add newly created oneOf interfaces
+        for (CodegenModel cm : addOneOfInterfaces) {
+            Map<String, Object> modelValue = new HashMap<String, Object>() {{
+                putAll(additionalProperties());
+                put("model", cm);
+            }};
+            List<Object> modelsValue = Arrays.asList(modelValue);
+            List<Map<String, String>> importsValue = new ArrayList<Map<String, String>>();
+            for (String i : Arrays.asList("JsonSubTypes", "JsonTypeInfo")) {
+                Map<String, String> oneImport = new HashMap<String, String>() {{
+                    put("import", importMapping.get(i));
+                }};
+                importsValue.add(oneImport);
+            }
+            Map<String, Object> objsValue = new HashMap<String, Object>() {{
+                put("models", modelsValue);
+                put("package", modelPackage());
+                put("imports", importsValue);
+                put("classname", cm.classname);
+                putAll(additionalProperties);
+            }};
+            objs.put(cm.name, objsValue);
+        }
+
+        // - Add all "oneOf" models as interfaces to be implemented by the models that
+        //   are the choices in "oneOf"; also mark the models containing "oneOf" as interfaces
+        // - Add all properties of "oneOf" to the implementing classes (NOTE that this
+        //   would be problematic if the class was in multiple such "oneOf" models, in which
+        //   case it would get all their properties, but it's probably better than not doing this)
+        // - Add all imports of "oneOf" model to all the implementing classes (this might not
+        //   be optimal, as it can contain more than necessary, but it's good enough)
+        Map<String, OneOfImplementorAdditionalData> additionalDataMap = new HashMap<String, OneOfImplementorAdditionalData>();
+        for (Map.Entry modelsEntry : objs.entrySet()) {
+            Map<String, Object> modelsAttrs = (Map<String, Object>) modelsEntry.getValue();
+            List<Object> models = (List<Object>) modelsAttrs.get("models");
+            List<Map<String, String>> modelsImports = (List<Map<String, String>>) modelsAttrs.getOrDefault("imports", new ArrayList<Map<String, String>>());
+            for (Object _mo : models) {
+                Map<String, Object> mo = (Map<String, Object>) _mo;
+                CodegenModel cm = (CodegenModel) mo.get("model");
+                if (cm.oneOf.size() > 0) {
+                    cm.vendorExtensions.put("isOneOfInterface", true);
+                    // if this is oneOf interface, make sure we include the necessary jackson imports for it
+                    for (String s : Arrays.asList("JsonTypeInfo", "JsonSubTypes")) {
+                        Map<String, String> i = new HashMap<String, String>() {{
+                            put("import", importMapping.get(s));
+                        }};
+                        if (!modelsImports.contains(i)) {
+                            modelsImports.add(i);
+                        }
+                    }
+                    for (String one : cm.oneOf) {
+                        if (!additionalDataMap.containsKey(one)) {
+                            additionalDataMap.put(one, new OneOfImplementorAdditionalData(one));
+                        }
+                        additionalDataMap.get(one).addFromInterfaceModel(cm, modelsImports);
+                    }
+                }
+            }
+        }
+
+        for (Map.Entry modelsEntry : objs.entrySet()) {
+            Map<String, Object> modelsAttrs = (Map<String, Object>) modelsEntry.getValue();
+            List<Object> models = (List<Object>) modelsAttrs.get("models");
+            List<Map<String, String>> imports = (List<Map<String, String>>) modelsAttrs.get("imports");
+            for (Object _implmo : models) {
+                Map<String, Object> implmo = (Map<String, Object>) _implmo;
+                CodegenModel implcm = (CodegenModel) implmo.get("model");
+                if (additionalDataMap.containsKey(implcm.name)) {
+                    additionalDataMap.get(implcm.name).addToImplementor(implcm, imports);
+                }
+            }
+        }
+
+        return objs;
+    }
+
     public void setUseBeanValidation(boolean useBeanValidation) {
         this.useBeanValidation = useBeanValidation;
     }
@@ -848,5 +1023,86 @@ public class SpringCodegen extends AbstractJavaCodegen
     @Override
     public void setUseOptional(boolean useOptional) {
         this.useOptional = useOptional;
+    }
+
+    private class OneOfImplementorAdditionalData {
+        private String implementorName;
+        private List<String> additionalInterfaces = new ArrayList<String>();
+        private List<CodegenProperty> additionalProps = new ArrayList<CodegenProperty>();
+        private List<Map<String, String>> additionalImports = new ArrayList<Map<String, String>>();
+
+        public OneOfImplementorAdditionalData(String implementorName) {
+            this.implementorName = implementorName;
+        }
+
+        public String getImplementorName() {
+            return implementorName;
+        }
+
+        public void addFromInterfaceModel(CodegenModel cm, List<Map<String, String>> modelsImports) {
+            // Add cm as implemented interface
+            additionalInterfaces.add(cm.classname);
+
+            // Add all vars defined on cm
+            // a "oneOf" model (cm) by default inherits all properties from its "interfaceModels",
+            // but we only want to add properties defined on cm itself
+            List<CodegenProperty> toAdd = new ArrayList<CodegenProperty>(cm.vars);
+            // note that we can't just toAdd.removeAll(m.vars) for every interfaceModel,
+            // as they might have different value of `hasMore` and thus are not equal
+            List<String> omitAdding = new ArrayList<String>();
+            for (CodegenModel m : cm.interfaceModels) {
+                for (CodegenProperty v : m.vars) {
+                    omitAdding.add(v.baseName);
+                }
+            }
+            for (CodegenProperty v : toAdd) {
+                if (!omitAdding.contains(v.baseName)) {
+                    additionalProps.add(v.clone());
+                }
+            }
+
+            // Add all imports of cm
+            for (Map<String, String> importMap : modelsImports) {
+                // we're ok with shallow clone here, because imports are strings only
+                additionalImports.add(new HashMap<String, String>(importMap));
+            }
+        }
+
+        public void addToImplementor(CodegenModel implcm, List<Map<String, String>> implImports) {
+            implcm.getVendorExtensions().putIfAbsent("implements", new ArrayList<String>());
+
+            // Add implemented interfaces
+            for (String intf : additionalInterfaces) {
+                List<String> impl = (List<String>) implcm.getVendorExtensions().get("implements");
+                impl.add(intf);
+                // Add imports for interfaces
+                implcm.imports.add(intf);
+                Map<String, String> importsItem = new HashMap<String, String>();
+                importsItem.put("import", toModelImport(intf));
+                implImports.add(importsItem);
+            }
+
+            // Add oneOf-containing models properties - we need to properly set the hasMore values to make renderind correct
+            if (implcm.vars.size() > 0 && additionalProps.size() > 0) {
+                implcm.vars.get(implcm.vars.size() - 1).hasMore = true;
+            }
+            for (int i = 0; i < additionalProps.size(); i++) {
+                CodegenProperty var = additionalProps.get(i);
+                if (i == additionalProps.size() - 1) {
+                    var.hasMore = false;
+                } else {
+                    var.hasMore = true;
+                }
+                implcm.vars.add(var);
+            }
+
+            // Add imports
+            for (Map<String, String> oneImport : additionalImports) {
+                // exclude imports from this package - these are imports that only the oneOf interface needs
+                if (!implImports.contains(oneImport) && !oneImport.getOrDefault("import", "").startsWith(modelPackage())) {
+                    implImports.add(oneImport);
+                }
+            }
+        }
     }
 }
